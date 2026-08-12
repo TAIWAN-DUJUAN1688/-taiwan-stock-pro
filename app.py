@@ -6,9 +6,9 @@ import requests
 import plotly.graph_objects as go
 from datetime import date, timedelta
 
-st.set_page_config(page_title="台股日週線買賣雷達 V10.1", layout="wide")
+st.set_page_config(page_title="台股日週線買賣雷達 V10.2", layout="wide")
 
-st.title("📈 台股日週線買賣雷達 V10.1")
+st.title("📈 台股日週線買賣雷達 V10.2")
 st.caption("▲ 買進訊號｜▼ 賣出訊號｜日線 / 週線切換｜停損價｜法人＋技術面｜FinMind")
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
@@ -903,7 +903,7 @@ else:
             if pd.notna(current_stop):
                 st.metric("🛑 目前停損價", f"{current_stop:.2f}")
 
-            st.subheader(f"📈 {timeframe} K線＋MA5／MA10／MA20＋▲買進 / ▼賣出")
+            st.subheader(f"📈 {timeframe} K線＋MA5／MA10／MA20＋▲買進 / ▼賣出＋🔄多空反轉")
             st.caption("▲ 買進後進入持有狀態；持有期間不重複買。▼ 賣出後回到空手，等待下一次 ▲。")
 
             fig = go.Figure()
@@ -977,6 +977,31 @@ else:
                     line_dash="dot",
                     annotation_text="停損價"
                 )
+
+
+            # 多空雙向反轉提示
+            bull_rev = d[d.get("BullReversal", False) == True] if "BullReversal" in d.columns else d.iloc[0:0]
+            bear_rev = d[d.get("BearReversal", False) == True] if "BearReversal" in d.columns else d.iloc[0:0]
+
+            if not bull_rev.empty:
+                fig.add_trace(go.Scatter(
+                    x=bull_rev.index,
+                    y=bull_rev["Low"] * 0.985,
+                    mode="markers",
+                    name="🔄 空翻多",
+                    marker=dict(symbol="diamond", size=11, color="#2563eb",
+                                line=dict(color="white", width=1))
+                ))
+
+            if not bear_rev.empty:
+                fig.add_trace(go.Scatter(
+                    x=bear_rev.index,
+                    y=bear_rev["High"] * 1.015,
+                    mode="markers",
+                    name="🔄 多翻空",
+                    marker=dict(symbol="diamond", size=11, color="#f97316",
+                                line=dict(color="white", width=1))
+                ))
 
             fig.update_layout(
                 height=720,
