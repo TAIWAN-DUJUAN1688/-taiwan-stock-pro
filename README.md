@@ -1,21 +1,8 @@
-# 台股強勢分析 MVP
+# 台股強勢分析 MVP V2
 
-## 功能
-- 輸入台股代號（例如 2330）
-- K線
-- MA5 / MA10 / MA20 / MA60
-- KD
-- MACD
-- RSI
-- 成交量
-- 100 分技術評分
-
-## 啟動方式
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-## 注意
-此版本使用 yfinance 作為測試資料來源。
-若要做正式商用版，建議改接具授權的台股行情資料來源。
+本次修正：
+- 自動嘗試 `.TW` 與 `.TWO`
+- `Ticker.history()` 主抓，`yf.download()` 備援
+- 增加 timeout、repair、錯誤診斷
+- 預設資料期間改為 2 年
+- 增加重新下載最新資料
