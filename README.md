@@ -1,15 +1,26 @@
-# 台股強勢分析 MVP V4.1
+# 台股法人籌碼雷達 V5
 
-## 修正內容
-- 修正 V4 Top20 的 FinMind HTTP 400 錯誤
-- 原因：FinMind `TaiwanStockPrice` 免費層不能不帶 `data_id` 抓全市場單日資料
-- 改成大型/高流動性候選清單逐檔抓取
-- 候選池可選 20 / 30 / 40
-- 保留 Top20 技術評分與個股分析
+## 新增
+- 三大法人：外資、投信、自營商
+- 法人合計與連買天數
+- 融資增減
+- 融券增減
+- 技術面 100 分
+- 籌碼面 40 分
+- 綜合分：技術面 60% + 籌碼面 40%
+- 綜合選股 Top20
+- 個股籌碼分析
 
-## 限制
-這不是全市場掃描。
-若要真正全市場掃描，需：
-1. FinMind Backer/Sponsor 權限，或
-2. 建立自己的每日資料庫/快取，或
-3. 改接可合法提供全市場日資料的其他資料源
+## FinMind 資料集
+- TaiwanStockPrice
+- TaiwanStockInstitutionalInvestorsBuySellWide
+- TaiwanStockMarginPurchaseShortSale
+- TaiwanStockInfo
+
+## API Token
+側邊欄可選填 FinMind Token。
+程式使用 `Authorization: Bearer <token>` Header，不會把 Token 寫入程式碼。
+
+## API 使用量
+候選池預設 15 檔，每檔約 3 個 API request。
+如未使用 Token，請避免短時間反覆大量掃描。
