@@ -6,9 +6,9 @@ import requests
 import plotly.graph_objects as go
 from datetime import date, timedelta
 
-st.set_page_config(page_title="台股獲利策略雷達 V12", layout="wide")
+st.set_page_config(page_title="台股獲利策略雷達 V12.1", layout="wide")
 
-st.title("📈 台股獲利策略雷達 V12")
+st.title("📈 台股獲利策略雷達 V12.1")
 st.caption("▲ 買進訊號｜▼ 賣出訊號｜日線 / 週線切換｜停損價｜法人＋技術面｜FinMind")
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
@@ -176,6 +176,14 @@ def calc_indicators(df):
         (d["Low"] - prev_close).abs(),
     ], axis=1).max(axis=1)
     d["ATR14"] = tr.rolling(14).mean()
+
+    # CCI20：與參考畫面一致，加入每根K線分析明細
+    tp = (d["High"] + d["Low"] + d["Close"]) / 3
+    tp_ma = tp.rolling(20).mean()
+    tp_mad = tp.rolling(20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    )
+    d["CCI20"] = (tp - tp_ma) / (0.015 * tp_mad.replace(0, np.nan))
 
     d["VOL_MA5"] = d["Volume"].rolling(5).mean()
     d["HIGH20_PREV"] = d["High"].shift(1).rolling(20).max()
@@ -1107,7 +1115,7 @@ else:
             latest = signals.iloc[-1] if not signals.empty else None
 
             if latest is None:
-                st.info("目前沒有符合 V11 完整條件的買賣訊號。")
+                st.info("目前沒有符合 V12 完整條件的買賣訊號。")
             elif latest["V11Signal"] == "BUY":
                 st.success(
                     f"最近訊號：▲ 買進｜訊號日 {latest.name.strftime('%Y-%m-%d')}｜"
@@ -1188,7 +1196,95 @@ else:
                 show["賣出訊號日"] = pd.to_datetime(show["賣出訊號日"]).dt.strftime("%Y-%m-%d")
                 st.dataframe(show, use_container_width=True, hide_index=True)
 
-            st.subheader("V11 規則")
+            # ------------------------------------------------------------
+            # V12.1：依參考畫面新增「每根K線策略分析明細」
+            # ------------------------------------------------------------
+            st.subheader("📋 每根 K 線策略分析")
+            st.caption(
+                "逐日顯示收盤價、成交量、MA5、MA20、CCI20、策略訊號、"
+                "下一根K線模擬成交日/價、回測動作與目前部位。"
+            )
+
+            detail = d.copy()
+            detail["策略訊號"] = "無新訊號"
+            detail.loc[detail["V11Signal"] == "BUY", "策略訊號"] = "模擬轉多訊號"
+            detail.loc[detail["V11Signal"] == "SELL", "策略訊號"] = "模擬轉空訊號"
+
+            # 訊號在當日收盤確認，下一根 K 線開盤模擬成交
+            detail["模擬成交日"] = ""
+            detail["模擬成交價"] = np.nan
+            detail["策略回測動作"] = "無回測動作"
+            detail["策略回測部位"] = "模擬空手"
+
+            position_state = "模擬空手"
+
+            for i in range(len(detail)):
+                sig = detail["V11Signal"].iloc[i]
+
+                if sig == "BUY":
+                    detail.iloc[i, detail.columns.get_loc("策略回測動作")] = "模擬轉多"
+                elif sig == "SELL":
+                    detail.iloc[i, detail.columns.get_loc("策略回測動作")] = "模擬轉空"
+
+                # 訊號下一根 K 線才正式改變部位
+                if i > 0:
+                    prev_sig = detail["V11Signal"].iloc[i-1]
+                    if prev_sig == "BUY":
+                        position_state = "模擬多單"
+                    elif prev_sig == "SELL":
+                        position_state = "模擬空手"
+
+                detail.iloc[i, detail.columns.get_loc("策略回測部位")] = position_state
+
+                # 將當日訊號對應到下一根K線的實際模擬成交
+                if sig in ("BUY", "SELL") and i + 1 < len(detail):
+                    next_date = detail.index[i+1]
+                    detail.iloc[i, detail.columns.get_loc("模擬成交日")] = next_date.strftime("%Y/%m/%d")
+                    detail.iloc[i, detail.columns.get_loc("模擬成交價")] = float(detail["Open"].iloc[i+1])
+
+            analysis_table = pd.DataFrame({
+                "日期": detail.index.strftime("%Y/%m/%d"),
+                "收盤價": detail["Close"].round(2),
+                "成交量": detail["Volume"].fillna(0).astype("int64"),
+                "MA5": detail["MA5"].round(2),
+                "MA20": detail["MA20"].round(2),
+                "CCI20": detail["CCI20"].round(2),
+                "策略訊號": detail["策略訊號"],
+                "模擬成交日": detail["模擬成交日"],
+                "模擬成交價": detail["模擬成交價"].round(2),
+                "策略回測動作": detail["策略回測動作"],
+                "策略回測部位": detail["策略回測部位"],
+            })
+
+            # 預設顯示最近 80 根 K 線，表格內可捲動
+            st.dataframe(
+                analysis_table.tail(80),
+                use_container_width=True,
+                hide_index=True,
+                height=610,
+                column_config={
+                    "日期": st.column_config.TextColumn("日期", width="small"),
+                    "收盤價": st.column_config.NumberColumn("收盤價", format="%.2f"),
+                    "成交量": st.column_config.NumberColumn("成交量", format="%d"),
+                    "MA5": st.column_config.NumberColumn("MA5", format="%.2f"),
+                    "MA20": st.column_config.NumberColumn("MA20", format="%.2f"),
+                    "CCI20": st.column_config.NumberColumn("CCI20", format="%.2f"),
+                    "策略訊號": st.column_config.TextColumn("策略訊號", width="medium"),
+                    "模擬成交日": st.column_config.TextColumn("模擬成交日", width="small"),
+                    "模擬成交價": st.column_config.NumberColumn("模擬成交價", format="%.2f"),
+                    "策略回測動作": st.column_config.TextColumn("策略回測動作", width="medium"),
+                    "策略回測部位": st.column_config.TextColumn("策略回測部位", width="medium"),
+                }
+            )
+
+            with st.expander("欄位說明"):
+                st.write("**策略訊號**：V12 原本策略當日收盤確認後產生的買進／賣出訊號。")
+                st.write("**模擬成交日／價**：訊號確認後，下一根 K 線開盤價作為回測成交基準。")
+                st.write("**策略回測動作**：當日是否出現模擬轉多／轉空動作。")
+                st.write("**策略回測部位**：模擬成交後目前處於多單或空手狀態。")
+                st.write("**CCI20**：20期商品通道指標，作為額外分析資訊；目前不改變 V12 原策略買賣規則。")
+
+            st.subheader("V12 規則")
             st.write("① **週線定方向**：週線多頭才允許新增多單。")
             st.write("② **日線找買點**：拉回 MA10 止穩或突破 20 日高點放量。")
             st.write("③ **籌碼過濾**：法人近期不能明顯轉空。")
@@ -1197,7 +1293,7 @@ else:
             st.warning("回測結果不代表未來績效。策略仍可能虧損；正式使用前應以不同市場階段與更多股票做樣本外測試。")
 
         except Exception as e:
-            st.error("V11 分析發生錯誤。")
+            st.error("V12.1 分析發生錯誤。")
             st.code(f"{type(e).__name__}: {e}")
 
 st.divider()
