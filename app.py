@@ -6,10 +6,10 @@ import requests
 import plotly.graph_objects as go
 from datetime import date, timedelta
 
-st.set_page_config(page_title="台股實戰選股雷達 V6", layout="wide")
+st.set_page_config(page_title="台股盤前盤後決策雷達 V7", layout="wide")
 
-st.title("🎯 台股實戰選股雷達 V6")
-st.caption("明日優先觀察 Top5｜法人＋融資＋量價＋技術面｜FinMind｜研究測試用途")
+st.title("🚦 台股盤前盤後決策雷達 V7")
+st.caption("明日決策 Top5｜法人＋融資＋量價＋技術面｜買點條件＋失效價＋風險報酬｜FinMind")
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 
@@ -324,7 +324,7 @@ def lock_score(chip, d):
     return min(s, 100)
 
 def overall_score(t_score, chip_score, lock):
-    # 技術 50%、籌碼 35%、法人集中代理 15%
+    # 技術 50%、籌碼 35%、籌碼強度 15%
     return round(t_score * 0.50 + chip_score * 0.875 + lock * 0.15, 1)
 
 def verdict(score):
@@ -341,6 +341,55 @@ WATCHLIST = [
     "2345","2360","2356","2376","2383","2395","2408","2449","2603","2609"
 ]
 
+
+# ==================== V7 決策引擎 ====================
+def trade_plan(d, levels, total_score, chip):
+    """產生條件式交易計畫；不是保證買賣價。"""
+    x = d.iloc[-1]
+    close = float(x["Close"])
+    atr = float(x["ATR14"]) if pd.notna(x["ATR14"]) and x["ATR14"] > 0 else close * 0.02
+    support = float(levels["支撐"])
+    resistance1 = float(levels["壓力"])
+
+    # 拉回區縮窄：靠近短中期支撐，避免 V6 區間過寬
+    pull_low = max(support, close - 0.65 * atr)
+    pull_high = min(close, support + 0.30 * atr)
+    if pull_high < pull_low:
+        pull_high = pull_low
+
+    # 突破條件：突破近期壓力且量能至少達 5 日均量 1.2 倍
+    breakout = max(close, resistance1)
+    resistance2 = max(resistance1 + atr, close + 1.5 * atr)
+
+    # 失效價：跌破支撐約 0.8 ATR
+    invalid = max(0.01, support - 0.8 * atr)
+
+    # 以拉回區中值作為風報計算基準
+    ref_entry = (pull_low + pull_high) / 2
+    risk = max(ref_entry - invalid, 0.01)
+    reward = max(resistance1 - ref_entry, 0)
+    rr = reward / risk if risk > 0 else 0
+
+    if total_score >= 82 and chip["法人合計"] > 0 and chip["法人連買"] >= 3:
+        action = "🔥 優先觀察"
+    elif total_score >= 70 and chip["法人合計"] > 0:
+        action = "🟢 偏多等待買點"
+    elif total_score >= 58:
+        action = "🟡 等待確認"
+    else:
+        action = "🔴 暫不追價"
+
+    return {
+        "決策": action,
+        "拉回觀察區": f"{pull_low:.2f}~{pull_high:.2f}",
+        "突破參考": round(breakout, 2),
+        "第一壓力": round(resistance1, 2),
+        "第二壓力": round(resistance2, 2),
+        "失效價": round(invalid, 2),
+        "風報比": round(rr, 2),
+        "突破條件": f"收盤/盤中有效突破 {breakout:.2f} 且量能≥5日均量1.2倍",
+    }
+
 # ==================== UI ====================
 with st.sidebar:
     st.header("設定")
@@ -351,7 +400,7 @@ with st.sidebar:
     )
     page = st.radio(
         "功能",
-        ["🎯 明日優先觀察 Top5", "📊 綜合排行 Top20", "🔍 個股實戰分析"],
+        ["🚦 明日決策 Top5", "🔥 法人＋技術雙強 Top5", "📊 綜合排行 Top20", "🔍 個股實戰分析"],
         index=0
     )
 
@@ -381,6 +430,7 @@ def scan_market(pool_size, token):
             lock = lock_score(chip, d)
             total = overall_score(t_score, chip["籌碼分"], lock)
             levels = price_levels(d)
+            plan = trade_plan(d, levels, total, chip)
 
             x = d.iloc[-1]
             p = d.iloc[-2]
@@ -400,7 +450,7 @@ def scan_market(pool_size, token):
                 "判定": verdict(total),
                 "技術分": t_score,
                 "籌碼分": chip["籌碼分"],
-                "法人集中代理": lock,
+                "籌碼強度": lock,
                 "外資(張)": round(chip["外資"], 0),
                 "投信(張)": round(chip["投信"], 0),
                 "法人連買": chip["法人連買"],
@@ -410,6 +460,14 @@ def scan_market(pool_size, token):
                 "壓力": levels["壓力"],
                 "觀察區": f"{levels['觀察區低']}~{levels['觀察區高']}",
                 "風險線": levels["風險線"],
+                "決策": plan["決策"],
+                "拉回觀察區": plan["拉回觀察區"],
+                "突破參考": plan["突破參考"],
+                "第一壓力": plan["第一壓力"],
+                "第二壓力": plan["第二壓力"],
+                "失效價": plan["失效價"],
+                "風報比": plan["風報比"],
+                "突破條件": plan["突破條件"],
                 "訊號": "、".join((chip["訊號"] + t_reasons)[:6]),
             })
 
@@ -422,7 +480,7 @@ def scan_market(pool_size, token):
     status.empty()
     return pd.DataFrame(rows)
 
-if page in ["🎯 明日優先觀察 Top5", "📊 綜合排行 Top20"]:
+if page in ["🚦 明日決策 Top5", "🔥 法人＋技術雙強 Top5", "📊 綜合排行 Top20"]:
     pool_size = st.selectbox("候選池大小", [10, 15, 20], index=1)
     run = st.button("開始掃描", type="primary")
 
@@ -435,21 +493,21 @@ if page in ["🎯 明日優先觀察 Top5", "📊 綜合排行 Top20"]:
             st.stop()
 
         out = out.sort_values(
-            ["實戰分", "法人集中代理", "技術分"],
+            ["實戰分", "籌碼強度", "技術分"],
             ascending=[False, False, False]
         ).reset_index(drop=True)
 
-        if page == "🎯 明日優先觀察 Top5":
+        if page == "🚦 明日決策 Top5":
             top5 = out.head(5).copy()
             top5.index = top5.index + 1
 
-            st.subheader("🎯 明日優先觀察 Top5")
+            st.subheader("🚦 明日決策 Top5")
             st.warning("此為盤後條件排序，不代表隔日必漲；請搭配開盤價、量能與大盤環境再次確認。")
             st.dataframe(
                 top5[[
-                    "股票代號","名稱","收盤價","漲跌幅%","實戰分","判定",
-                    "外資(張)","投信(張)","法人連買","法人集中代理",
-                    "量比","支撐","壓力","觀察區","風險線"
+                    "股票代號","名稱","收盤價","實戰分","決策",
+                    "外資(張)","投信(張)","法人連買","籌碼強度","量比",
+                    "拉回觀察區","突破參考","第一壓力","第二壓力","失效價","風報比"
                 ]],
                 use_container_width=True,
                 height=330
@@ -458,10 +516,35 @@ if page in ["🎯 明日優先觀察 Top5", "📊 綜合排行 Top20"]:
             best = top5.iloc[0]
             st.success(
                 f"目前第 1 名：{best['股票代號']} {best['名稱']}｜"
-                f"實戰分 {best['實戰分']}｜{best['判定']}｜"
-                f"觀察區 {best['觀察區']}｜風險線 {best['風險線']}"
+                f"實戰分 {best['實戰分']}｜{best['決策']}｜"
+                f"拉回區 {best['拉回觀察區']}｜突破參考 {best['突破參考']}｜失效價 {best['失效價']}"
             )
 
+        elif page == "🔥 法人＋技術雙強 Top5":
+            strong = out[
+                (out["外資(張)"] + out["投信(張)"] > 0) &
+                (out["技術分"] >= 60) &
+                (out["籌碼強度"] >= 60)
+            ].copy()
+            strong = strong.sort_values(
+                ["籌碼強度", "技術分", "實戰分"],
+                ascending=[False, False, False]
+            ).head(5)
+            strong.index = range(1, len(strong) + 1)
+            st.subheader("🔥 法人＋技術雙強 Top5")
+            st.caption("優先篩選法人偏多、技術結構偏強且籌碼強度較高的標的。")
+            if strong.empty:
+                st.info("本次候選池沒有同時符合法人＋技術雙強條件的股票。")
+            else:
+                st.dataframe(
+                    strong[[
+                        "股票代號","名稱","實戰分","技術分","籌碼強度",
+                        "外資(張)","投信(張)","法人連買","量比",
+                        "拉回觀察區","突破參考","失效價","風報比"
+                    ]],
+                    use_container_width=True,
+                    height=330
+                )
         else:
             top20 = out.head(20).copy()
             top20.index = top20.index + 1
@@ -489,20 +572,23 @@ else:
             lock = lock_score(chip, d)
             total = overall_score(t_score, chip["籌碼分"], lock)
             levels = price_levels(d)
+            plan = trade_plan(d, levels, total, chip)
             x = d.iloc[-1]
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("收盤價", f"{x['Close']:.2f}")
             c2.metric("實戰分", f"{total}/100")
-            c3.metric("法人集中代理", f"{lock}/100")
+            c3.metric("籌碼強度", f"{lock}/100")
             c4.metric("判定", verdict(total))
 
-            st.subheader("關鍵價位")
+            st.subheader("🚦 明日決策卡")
+            st.success(f"{plan['決策']}｜{plan['突破條件']}")
             a,b,c,dcol = st.columns(4)
-            a.metric("支撐參考", f"{levels['支撐']}")
-            b.metric("壓力參考", f"{levels['壓力']}")
-            c.metric("拉回觀察區", f"{levels['觀察區低']} ~ {levels['觀察區高']}")
-            dcol.metric("風險線參考", f"{levels['風險線']}")
+            a.metric("拉回觀察區", plan["拉回觀察區"])
+            b.metric("突破參考", f"{plan['突破參考']}")
+            c.metric("第一 / 第二壓力", f"{plan['第一壓力']} / {plan['第二壓力']}")
+            dcol.metric("失效價", f"{plan['失效價']}")
+            st.metric("風險報酬比", f"{plan['風報比']}:1")
 
             st.subheader("法人籌碼")
             a,b,c,dcol = st.columns(4)
@@ -527,8 +613,9 @@ else:
                     x=d.index, y=d[f"MA{n}"], mode="lines", name=f"MA{n}"
                 ))
             fig.add_hline(y=levels["支撐"], line_dash="dash", annotation_text="支撐")
-            fig.add_hline(y=levels["壓力"], line_dash="dash", annotation_text="壓力")
-            fig.add_hline(y=levels["風險線"], line_dash="dot", annotation_text="風險線")
+            fig.add_hline(y=plan["第一壓力"], line_dash="dash", annotation_text="第一壓力")
+            fig.add_hline(y=plan["第二壓力"], line_dash="dash", annotation_text="第二壓力")
+            fig.add_hline(y=plan["失效價"], line_dash="dot", annotation_text="失效價")
             fig.update_layout(height=650, xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
 
@@ -537,7 +624,7 @@ else:
                 st.write(f"✅ {s}")
 
             st.info(
-                "「法人集中代理」不是實際法人持股集中度，而是依法人淨買超、連買、融資變化與技術結構建立的代理分數。"
+                "「籌碼強度」不是實際法人持股集中度，而是依法人淨買超、連買、融資變化與技術結構建立的代理分數。"
             )
 
         except Exception as e:
@@ -546,5 +633,5 @@ else:
 
 st.divider()
 st.caption(
-    "本系統僅供技術與籌碼研究，不構成投資建議。支撐、壓力、觀察區與風險線均為模型參考值，不是保證成交或獲利價位。"
+    "本系統僅供技術與籌碼研究，不構成投資建議。拉回觀察區、突破參考、壓力、失效價與風險報酬比均為模型條件值，不是保證成交或獲利價位。"
 )
