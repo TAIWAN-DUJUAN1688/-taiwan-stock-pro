@@ -6,9 +6,9 @@ import requests
 import plotly.graph_objects as go
 from datetime import date, timedelta
 
-st.set_page_config(page_title="台股穩健買賣雷達 V11", layout="wide")
+st.set_page_config(page_title="台股獲利策略雷達 V12", layout="wide")
 
-st.title("📈 台股穩健買賣雷達 V11")
+st.title("📈 台股獲利策略雷達 V12")
 st.caption("▲ 買進訊號｜▼ 賣出訊號｜日線 / 週線切換｜停損價｜法人＋技術面｜FinMind")
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
@@ -870,6 +870,39 @@ def backtest_v11(d, fee_rate=0.001425, tax_rate=0.003):
     return t, stats
 
 
+
+# ==================== V12 策略驗證層 ====================
+def buy_hold_return(df, fee_rate=0.001425, tax_rate=0.003):
+    if len(df) < 2:
+        return 0.0
+    buy = float(df.iloc[0]["Open"]) * (1 + fee_rate)
+    sell = float(df.iloc[-1]["Close"]) * (1 - fee_rate - tax_rate)
+    return (sell / buy - 1) * 100
+
+def validation_grade(stats, benchmark):
+    if stats["交易次數"] < 4:
+        return False, "交易樣本不足"
+    if stats["總淨報酬"] <= 0:
+        return False, "策略歷史淨報酬未轉正"
+    if stats["ProfitFactor"] < 1.15:
+        return False, "Profit Factor 不足"
+    if stats["勝率"] < 40:
+        return False, "歷史勝率偏低"
+    if stats["總淨報酬"] < benchmark:
+        return False, "歷史績效未勝過買進持有"
+    return True, "通過歷史策略驗證"
+
+def latest_trade_action(d, passed):
+    sig = d[d["V11Signal"] != ""]
+    if not passed:
+        return "⚪ 不交易", "歷史策略驗證未通過，不發新的買進訊號。"
+    if sig.empty:
+        return "🟡 等待", "尚未形成完整買進條件。"
+    last = sig.iloc[-1]
+    if last["V11Signal"] == "BUY":
+        return "🟢 持有／可觀察", "最近有效訊號為買進；持有期間依停損與趨勢退出。"
+    return "🟡 等待下一次買點", "最近有效訊號為賣出，目前不追價。"
+
 # ==================== UI ====================
 with st.sidebar:
     st.header("設定")
@@ -1048,6 +1081,9 @@ else:
 
             d, weekly_state, chip = robust_trade_signals(daily, inst, margin)
             trades, stats = backtest_v11(d)
+            benchmark = round(buy_hold_return(d), 1)
+            passed, validation_reason = validation_grade(stats, benchmark)
+            current_action, action_reason = latest_trade_action(d, passed)
 
             state_text = {
                 "BULL":"🟢 週線多頭：只找日線買點",
@@ -1057,6 +1093,15 @@ else:
             }.get(weekly_state, "⚪ 未知")
 
             st.markdown(f"## {state_text}")
+
+            st.subheader("💰 策略驗證結果")
+            if passed:
+                st.success(f"✅ 通過｜{validation_reason}")
+            else:
+                st.error(f"❌ 不通過｜{validation_reason}")
+            st.markdown(f"## 目前動作：{current_action}")
+            st.write(action_reason)
+            st.caption("未通過歷史驗證時，系統不顯示新的買進訊號；任何回測都不保證未來獲利。")
 
             signals = d[d["V11Signal"] != ""]
             latest = signals.iloc[-1] if not signals.empty else None
@@ -1094,7 +1139,7 @@ else:
             fig.add_trace(go.Scatter(x=d.index, y=d["MA20"], mode="lines", name="MA20",
                                      line=dict(color="#A855F7", width=2.0)))
 
-            buys = d[d["V11Signal"] == "BUY"]
+            buys = d[d["V11Signal"] == "BUY"] if passed else d.iloc[0:0]
             sells = d[d["V11Signal"] == "SELL"]
 
             if not buys.empty:
@@ -1128,9 +1173,14 @@ else:
             a,b,c,dcol,e = st.columns(5)
             a.metric("交易次數", stats["交易次數"])
             b.metric("勝率", f'{stats["勝率"]}%')
-            c.metric("總淨報酬", f'{stats["總淨報酬"]}%')
+            c.metric("策略淨報酬", f'{stats["總淨報酬"]}%')
             dcol.metric("Profit Factor", stats["ProfitFactor"])
             e.metric("最大單筆虧損", f'{stats["最大單筆虧損"]}%')
+
+            x1,x2 = st.columns(2)
+            x1.metric("買進持有基準", f"{benchmark}%")
+            alpha = round(stats["總淨報酬"] - benchmark, 1)
+            x2.metric("策略超額報酬", f"{alpha:+.1f}%")
 
             if not trades.empty:
                 show = trades.tail(20).copy()
