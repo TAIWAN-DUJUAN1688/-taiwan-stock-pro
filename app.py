@@ -6,10 +6,10 @@ import requests
 import plotly.graph_objects as go
 from datetime import date, timedelta
 
-st.set_page_config(page_title="台股買賣訊號雷達 V8", layout="wide")
+st.set_page_config(page_title="台股買賣決策雷達 V9", layout="wide")
 
-st.title("🎯 台股買賣訊號雷達 V8")
-st.caption("K線買賣訊號｜進場條件｜停損失效｜目標價｜法人＋量價＋技術面｜FinMind")
+st.title("🚦 台股買賣決策雷達 V9")
+st.caption("目前動作｜參考買進｜停損價｜第一目標｜第二目標｜法人＋量價＋技術面｜FinMind")
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 
@@ -361,7 +361,7 @@ def trade_plan(d, levels, total_score, chip):
     breakout = max(close, resistance1)
     resistance2 = max(resistance1 + atr, close + 1.5 * atr)
 
-    # 失效價：跌破支撐約 0.8 ATR
+    # 停損價：跌破支撐約 0.8 ATR
     invalid = max(0.01, support - 0.8 * atr)
 
     # 以拉回區中值作為風報計算基準
@@ -385,7 +385,7 @@ def trade_plan(d, levels, total_score, chip):
         "突破參考": round(breakout, 2),
         "第一壓力": round(resistance1, 2),
         "第二壓力": round(resistance2, 2),
-        "失效價": round(invalid, 2),
+        "停損價": round(invalid, 2),
         "風報比": round(rr, 2),
         "突破條件": f"收盤/盤中有效突破 {breakout:.2f} 且量能≥5日均量1.2倍",
     }
@@ -467,7 +467,7 @@ def current_signal_card(d, plan):
     atr = float(x["ATR14"]) if pd.notna(x["ATR14"]) and x["ATR14"] > 0 else close * 0.02
 
     breakout = float(plan["突破參考"])
-    stop = float(plan["失效價"])
+    stop = float(plan["停損價"])
 
     # 目標價以突破價/現價為基準，避免第一壓力與突破價完全重複。
     entry_ref = max(close, breakout)
@@ -486,7 +486,7 @@ def current_signal_card(d, plan):
 
     if sell_now:
         state = "🔴 賣出／退出訊號"
-        instruction = f"收盤跌破關鍵趨勢或失效價 {stop:.2f}，優先控管風險。"
+        instruction = f"收盤跌破關鍵趨勢或停損價 {stop:.2f}，優先控管風險。"
     elif buy_now:
         state = "🟢 偏多，等待買點"
         instruction = (
@@ -505,12 +505,68 @@ def current_signal_card(d, plan):
         "目前訊號": state,
         "操作條件": instruction,
         "參考進場": round(entry_ref, 2),
-        "停損失效": round(stop, 2),
+        "停損價": round(stop, 2),
         "第一目標": round(target1, 2),
         "第二目標": round(target2, 2),
         "風報比1": round(rr1, 2),
         "風報比2": round(rr2, 2),
     }
+
+
+# ==================== V9 買賣決策引擎 ====================
+def action_decision(d, signal_card, chip):
+    """
+    將 V8 訊號轉成更直覺的四種目前動作：
+    買進 / 等待 / 減碼 / 賣出。
+    """
+    x = d.iloc[-1]
+    p = d.iloc[-2]
+
+    close = float(x["Close"])
+    ma20 = float(x["MA20"]) if pd.notna(x["MA20"]) else close
+    rsi = float(x["RSI"]) if pd.notna(x["RSI"]) else 50
+    vol_ma5 = float(x["VOL_MA5"]) if pd.notna(x["VOL_MA5"]) and x["VOL_MA5"] > 0 else float(x["Volume"])
+    vol_ratio = float(x["Volume"]) / vol_ma5 if vol_ma5 > 0 else 1.0
+
+    entry = float(signal_card["參考進場"])
+    stop = float(signal_card["停損價"])
+    target1 = float(signal_card["第一目標"])
+    target2 = float(signal_card["第二目標"])
+
+    near_entry = abs(close - entry) / max(entry, 0.01) <= 0.015
+    breakout_ok = close >= entry and vol_ratio >= 1.2
+    trend_ok = close > ma20 and x["MA5"] > x["MA20"] and x["MACD"] > x["Signal"]
+    chip_ok = chip["法人合計"] > 0 or chip["法人連買"] >= 3
+
+    # 優先順序：賣出 > 減碼 > 買進 > 等待
+    if close <= stop or (close < ma20 and x["MACD"] < x["Signal"]):
+        action = "🔴 賣出"
+        reason = "跌破停損價或中期趨勢轉弱，優先控制風險。"
+    elif close >= target1 or rsi >= 78:
+        action = "🟠 減碼"
+        reason = "接近/突破第一目標或動能過熱，可分批調節。"
+    elif trend_ok and chip_ok and (near_entry or breakout_ok):
+        action = "🟢 買進"
+        reason = "趨勢、籌碼與價量條件同時轉強，進入可執行區。"
+    else:
+        action = "🟡 等待"
+        reason = "條件偏多但尚未到理想買點，不追價，等待拉回或突破確認。"
+
+    distance_pct = (entry / close - 1) * 100 if close > 0 else 0
+
+    return {
+        "目前動作": action,
+        "動作原因": reason,
+        "距離買進價%": round(distance_pct, 2),
+        "量比": round(vol_ratio, 2),
+        "參考買進": round(entry, 2),
+        "停損價": round(stop, 2),
+        "第一目標": round(target1, 2),
+        "第二目標": round(target2, 2),
+        "風報比1": signal_card["風報比1"],
+        "風報比2": signal_card["風報比2"],
+    }
+
 
 # ==================== UI ====================
 with st.sidebar:
@@ -587,7 +643,7 @@ def scan_market(pool_size, token):
                 "突破參考": plan["突破參考"],
                 "第一壓力": plan["第一壓力"],
                 "第二壓力": plan["第二壓力"],
-                "失效價": plan["失效價"],
+                "停損價": plan["停損價"],
                 "風報比": plan["風報比"],
                 "突破條件": plan["突破條件"],
                 "訊號": "、".join((chip["訊號"] + t_reasons)[:6]),
@@ -629,7 +685,7 @@ if page in ["🚦 明日決策 Top5", "🔥 法人＋技術雙強 Top5", "📊 �
                 top5[[
                     "股票代號","名稱","收盤價","實戰分","決策",
                     "外資(張)","投信(張)","法人連買","籌碼強度","量比",
-                    "拉回觀察區","突破參考","第一壓力","第二壓力","失效價","風報比"
+                    "拉回觀察區","突破參考","第一壓力","第二壓力","停損價","風報比"
                 ]],
                 use_container_width=True,
                 height=330
@@ -639,7 +695,7 @@ if page in ["🚦 明日決策 Top5", "🔥 法人＋技術雙強 Top5", "📊 �
             st.success(
                 f"目前第 1 名：{best['股票代號']} {best['名稱']}｜"
                 f"實戰分 {best['實戰分']}｜{best['決策']}｜"
-                f"拉回區 {best['拉回觀察區']}｜突破參考 {best['突破參考']}｜失效價 {best['失效價']}"
+                f"拉回區 {best['拉回觀察區']}｜突破參考 {best['突破參考']}｜停損價 {best['停損價']}"
             )
 
         elif page == "🔥 法人＋技術雙強 Top5":
@@ -662,7 +718,7 @@ if page in ["🚦 明日決策 Top5", "🔥 法人＋技術雙強 Top5", "📊 �
                     strong[[
                         "股票代號","名稱","實戰分","技術分","籌碼強度",
                         "外資(張)","投信(張)","法人連買","量比",
-                        "拉回觀察區","突破參考","失效價","風報比"
+                        "拉回觀察區","突破參考","停損價","風報比"
                     ]],
                     use_container_width=True,
                     height=330
@@ -697,6 +753,7 @@ else:
             plan = trade_plan(d, levels, total, chip)
             d = build_trade_signals(d)
             signal_card = current_signal_card(d, plan)
+            action_card = action_decision(d, signal_card, chip)
             x = d.iloc[-1]
 
             c1, c2, c3, c4 = st.columns(4)
@@ -705,18 +762,24 @@ else:
             c3.metric("籌碼強度", f"{lock}/100")
             c4.metric("判定", verdict(total))
 
-            st.subheader("🎯 V8 買賣決策")
-            st.info("訊號以收盤確認為原則；當日收盤形成的訊號，最早以下一交易日作為執行參考。")
-            st.markdown(f"### {signal_card['目前訊號']}")
-            st.write(signal_card["操作條件"])
+            st.subheader("🚦 V9 買賣決策")
+            st.info("訊號以收盤確認為原則；當日形成的訊號，最早以下一交易日作為執行參考。")
+            st.markdown(f"## {action_card['目前動作']}")
+            st.write(action_card["動作原因"])
+
             q1,q2,q3,q4 = st.columns(4)
-            q1.metric("參考進場", f"{signal_card['參考進場']}")
-            q2.metric("停損 / 失效", f"{signal_card['停損失效']}")
-            q3.metric("第一目標", f"{signal_card['第一目標']}")
-            q4.metric("第二目標", f"{signal_card['第二目標']}")
+            q1.metric("參考買進價", f"{action_card['參考買進']}")
+            q2.metric("🛑 停損價", f"{action_card['停損價']}")
+            q3.metric("🎯 第一目標", f"{action_card['第一目標']}")
+            q4.metric("🎯 第二目標", f"{action_card['第二目標']}")
+
+            r1,r2,r3 = st.columns(3)
+            r1.metric("距離買進價", f"{action_card['距離買進價%']:+.2f}%")
+            r2.metric("目前量比", f"{action_card['量比']:.2f}")
+            r3.metric("風報比", f"{action_card['風報比1']}:1 / {action_card['風報比2']}:1")
+
             st.caption(
-                f"風報比：第一目標 {signal_card['風報比1']}:1｜"
-                f"第二目標 {signal_card['風報比2']}:1"
+                f"原始訊號：{signal_card['目前訊號']}｜{signal_card['操作條件']}"
             )
 
             st.subheader("🚦 明日決策卡")
@@ -725,7 +788,7 @@ else:
             a.metric("拉回觀察區", plan["拉回觀察區"])
             b.metric("突破參考", f"{plan['突破參考']}")
             c.metric("第一 / 第二壓力", f"{plan['第一壓力']} / {plan['第二壓力']}")
-            dcol.metric("失效價", f"{plan['失效價']}")
+            dcol.metric("停損價", f"{plan['停損價']}")
             st.metric("風險報酬比", f"{plan['風報比']}:1")
 
             st.subheader("法人籌碼")
@@ -778,7 +841,7 @@ else:
                 ))
 
             fig.add_hline(y=signal_card["參考進場"], line_dash="dash", annotation_text="參考進場")
-            fig.add_hline(y=signal_card["停損失效"], line_dash="dot", annotation_text="停損/失效")
+            fig.add_hline(y=signal_card["停損價"], line_dash="dot", annotation_text="停損價")
             fig.add_hline(y=signal_card["第一目標"], line_dash="dash", annotation_text="第一目標")
             fig.add_hline(y=signal_card["第二目標"], line_dash="dash", annotation_text="第二目標")
             fig.update_layout(height=700, xaxis_rangeslider_visible=False)
@@ -812,5 +875,5 @@ else:
 
 st.divider()
 st.caption(
-    "本系統僅供技術與籌碼研究，不構成投資建議。拉回觀察區、突破參考、壓力、失效價與風險報酬比均為模型條件值，不是保證成交或獲利價位。"
+    "本系統僅供技術與籌碼研究，不構成投資建議。拉回觀察區、突破參考、壓力、停損價與風險報酬比均為模型條件值，不是保證成交或獲利價位。"
 )
