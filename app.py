@@ -6,14 +6,14 @@ import requests
 import plotly.graph_objects as go
 from datetime import date, timedelta
 
-st.set_page_config(page_title="台股法人籌碼雷達 V5", layout="wide")
+st.set_page_config(page_title="台股實戰選股雷達 V6", layout="wide")
 
-st.title("📊 台股法人籌碼雷達 V5")
-st.caption("法人＋融資＋技術面綜合選股｜FinMind 台股資料｜研究測試用途")
+st.title("🎯 台股實戰選股雷達 V6")
+st.caption("明日優先觀察 Top5｜法人＋融資＋量價＋技術面｜FinMind｜研究測試用途")
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 
-# ---------------- API ----------------
+# ==================== API ====================
 def api_get(params, token="", timeout=30):
     headers = {}
     if token and token.strip():
@@ -35,7 +35,7 @@ def get_stock_info(token=""):
     return df
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_price_history(symbol, days=180, token=""):
+def get_price_history(symbol, days=220, token=""):
     end_date = date.today()
     start_date = end_date - timedelta(days=days)
     payload = api_get({
@@ -44,6 +44,7 @@ def get_price_history(symbol, days=180, token=""):
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
     }, token)
+
     df = pd.DataFrame(payload.get("data", []))
     if df.empty:
         return df
@@ -77,7 +78,7 @@ def get_price_history(symbol, days=180, token=""):
     return df
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_institutional(symbol, days=20, token=""):
+def get_institutional(symbol, days=30, token=""):
     end_date = date.today()
     start_date = end_date - timedelta(days=days)
     payload = api_get({
@@ -92,19 +93,18 @@ def get_institutional(symbol, days=20, token=""):
         return df
 
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    numeric_cols = [c for c in df.columns if c.endswith("_buy") or c.endswith("_sell")]
-    for c in numeric_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-    for c in [
+    needed = [
         "Foreign_Investor_buy","Foreign_Investor_sell",
         "Investment_Trust_buy","Investment_Trust_sell",
         "Dealer_buy","Dealer_sell",
         "Dealer_self_buy","Dealer_self_sell",
         "Dealer_Hedging_buy","Dealer_Hedging_sell",
-    ]:
+    ]
+    for c in needed:
         if c not in df.columns:
             df[c] = 0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
     df["ForeignNet"] = df["Foreign_Investor_buy"] - df["Foreign_Investor_sell"]
     df["TrustNet"] = df["Investment_Trust_buy"] - df["Investment_Trust_sell"]
@@ -118,7 +118,7 @@ def get_institutional(symbol, days=20, token=""):
     return df.sort_values("date")
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def get_margin(symbol, days=20, token=""):
+def get_margin(symbol, days=30, token=""):
     end_date = date.today()
     start_date = end_date - timedelta(days=days)
     payload = api_get({
@@ -133,15 +133,16 @@ def get_margin(symbol, days=20, token=""):
         return df
 
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    for c in [
+    numeric_cols = [
         "MarginPurchaseTodayBalance","MarginPurchaseYesterdayBalance",
         "ShortSaleTodayBalance","ShortSaleYesterdayBalance",
-    ]:
+    ]
+    for c in numeric_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     return df.sort_values("date")
 
-# ---------------- 技術面 ----------------
+# ==================== 指標 ====================
 def calc_indicators(df):
     d = df.copy()
 
@@ -168,22 +169,42 @@ def calc_indicators(df):
     rs = avg_gain / avg_loss.replace(0, np.nan)
     d["RSI"] = 100 - (100 / (1 + rs))
 
+    prev_close = d["Close"].shift(1)
+    tr = pd.concat([
+        d["High"] - d["Low"],
+        (d["High"] - prev_close).abs(),
+        (d["Low"] - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    d["ATR14"] = tr.rolling(14).mean()
+
     d["VOL_MA5"] = d["Volume"].rolling(5).mean()
     d["HIGH20_PREV"] = d["High"].shift(1).rolling(20).max()
+    d["LOW20_PREV"] = d["Low"].shift(1).rolling(20).min()
+    d["HIGH60_PREV"] = d["High"].shift(1).rolling(60).max()
+    d["LOW60_PREV"] = d["Low"].shift(1).rolling(60).min()
     return d
+
+def consecutive_positive(series):
+    n = 0
+    for v in reversed(series.tolist()):
+        if pd.notna(v) and v > 0:
+            n += 1
+        else:
+            break
+    return n
 
 def technical_score(d):
     if len(d) < 61:
         return 0, []
 
     x = d.iloc[-1]
-    prev = d.iloc[-2]
+    p = d.iloc[-2]
     score = 0
     reasons = []
 
     if x["Close"] > x["MA20"]:
         score += 10; reasons.append("站上MA20")
-    if x["MA20"] > prev["MA20"]:
+    if x["MA20"] > p["MA20"]:
         score += 10; reasons.append("MA20向上")
     if x["Close"] > x["MA60"]:
         score += 10; reasons.append("站上MA60")
@@ -209,75 +230,110 @@ def technical_score(d):
 
     return min(score, 100), reasons
 
-# ---------------- 籌碼面 ----------------
-def consecutive_positive(series):
-    n = 0
-    for v in reversed(series.tolist()):
-        if pd.notna(v) and v > 0:
-            n += 1
-        else:
-            break
-    return n
-
 def chip_summary(inst, margin):
-    result = {
-        "外資買賣超": 0,
-        "投信買賣超": 0,
-        "自營商買賣超": 0,
-        "法人合計": 0,
-        "法人連買天數": 0,
-        "融資增減": 0,
-        "融券增減": 0,
-        "籌碼分": 0,
-        "籌碼訊號": [],
+    r = {
+        "外資": 0.0, "投信": 0.0, "自營": 0.0, "法人合計": 0.0,
+        "法人連買": 0, "融資增減": 0.0, "融券增減": 0.0,
+        "籌碼分": 0, "訊號": []
     }
 
     if not inst.empty:
         x = inst.iloc[-1]
-        result["外資買賣超"] = float(x["ForeignNet"]) / 1000
-        result["投信買賣超"] = float(x["TrustNet"]) / 1000
-        result["自營商買賣超"] = float(x["DealerNet"]) / 1000
-        result["法人合計"] = float(x["TotalInstNet"]) / 1000
-        result["法人連買天數"] = consecutive_positive(inst["TotalInstNet"])
+        r["外資"] = float(x["ForeignNet"]) / 1000
+        r["投信"] = float(x["TrustNet"]) / 1000
+        r["自營"] = float(x["DealerNet"]) / 1000
+        r["法人合計"] = float(x["TotalInstNet"]) / 1000
+        r["法人連買"] = consecutive_positive(inst["TotalInstNet"])
 
         if x["ForeignNet"] > 0:
-            result["籌碼分"] += 10
-            result["籌碼訊號"].append("外資買超")
+            r["籌碼分"] += 10; r["訊號"].append("外資買超")
         if x["TrustNet"] > 0:
-            result["籌碼分"] += 10
-            result["籌碼訊號"].append("投信買超")
+            r["籌碼分"] += 10; r["訊號"].append("投信買超")
         if x["DealerNet"] > 0:
-            result["籌碼分"] += 5
-            result["籌碼訊號"].append("自營商買超")
-        if result["法人連買天數"] >= 3:
-            result["籌碼分"] += 5
-            result["籌碼訊號"].append("法人連買≥3日")
+            r["籌碼分"] += 5; r["訊號"].append("自營商買超")
+        if r["法人連買"] >= 3:
+            r["籌碼分"] += 5; r["訊號"].append("法人連買≥3日")
 
     if not margin.empty:
         x = margin.iloc[-1]
         if pd.notna(x.get("MarginPurchaseTodayBalance")) and pd.notna(x.get("MarginPurchaseYesterdayBalance")):
-            result["融資增減"] = float(x["MarginPurchaseTodayBalance"] - x["MarginPurchaseYesterdayBalance"])
-            if result["融資增減"] < 0:
-                result["籌碼分"] += 5
-                result["籌碼訊號"].append("融資減少")
+            r["融資增減"] = float(x["MarginPurchaseTodayBalance"] - x["MarginPurchaseYesterdayBalance"])
+            if r["融資增減"] < 0:
+                r["籌碼分"] += 5; r["訊號"].append("融資減少")
 
         if pd.notna(x.get("ShortSaleTodayBalance")) and pd.notna(x.get("ShortSaleYesterdayBalance")):
-            result["融券增減"] = float(x["ShortSaleTodayBalance"] - x["ShortSaleYesterdayBalance"])
-            if result["融券增減"] > 0:
-                result["籌碼分"] += 5
-                result["籌碼訊號"].append("融券增加")
+            r["融券增減"] = float(x["ShortSaleTodayBalance"] - x["ShortSaleYesterdayBalance"])
+            if r["融券增減"] > 0:
+                r["籌碼分"] += 5; r["訊號"].append("融券增加")
 
-    result["籌碼分"] = min(result["籌碼分"], 40)
-    return result
+    r["籌碼分"] = min(r["籌碼分"], 40)
+    return r
 
-def overall_grade(score):
-    if score >= 85: return "🔥 重點關注"
+# ==================== 實戰參考 ====================
+def price_levels(d):
+    x = d.iloc[-1]
+    close = float(x["Close"])
+    atr = float(x["ATR14"]) if pd.notna(x["ATR14"]) else close * 0.02
+
+    support_candidates = [
+        x.get("MA5"), x.get("MA10"), x.get("MA20"),
+        x.get("LOW20_PREV"), x.get("LOW60_PREV")
+    ]
+    support_candidates = [
+        float(v) for v in support_candidates
+        if pd.notna(v) and float(v) <= close
+    ]
+    support = max(support_candidates) if support_candidates else close - atr
+
+    resistance_candidates = [x.get("HIGH20_PREV"), x.get("HIGH60_PREV")]
+    resistance_candidates = [
+        float(v) for v in resistance_candidates
+        if pd.notna(v) and float(v) > close
+    ]
+    resistance = min(resistance_candidates) if resistance_candidates else close + 2 * atr
+
+    entry_low = support
+    entry_high = min(close, support + 0.5 * atr)
+    stop = max(0.01, support - 1.2 * atr)
+
+    return {
+        "支撐": round(support, 2),
+        "壓力": round(resistance, 2),
+        "觀察區低": round(entry_low, 2),
+        "觀察區高": round(entry_high, 2),
+        "風險線": round(stop, 2),
+        "ATR": round(atr, 2),
+    }
+
+def lock_score(chip, d):
+    """
+    法人鎖碼代理分：不是實際持股集中度。
+    僅用法人連買、法人淨買超、融資變化與技術結構做代理評估。
+    """
+    s = 0
+    x = d.iloc[-1]
+
+    if chip["法人合計"] > 0: s += 25
+    if chip["法人連買"] >= 3: s += 25
+    if chip["投信"] > 0: s += 15
+    if chip["外資"] > 0: s += 10
+    if chip["融資增減"] < 0: s += 10
+    if x["Close"] > x["MA20"]: s += 10
+    if x["Volume"] > x["VOL_MA5"]: s += 5
+
+    return min(s, 100)
+
+def overall_score(t_score, chip_score, lock):
+    # 技術 50%、籌碼 35%、法人集中代理 15%
+    return round(t_score * 0.50 + chip_score * 0.875 + lock * 0.15, 1)
+
+def verdict(score):
+    if score >= 82: return "🔥 優先觀察"
     if score >= 70: return "🟢 偏多"
-    if score >= 55: return "🟡 觀察"
-    if score >= 40: return "⚠️ 偏弱"
+    if score >= 58: return "🟡 等待"
+    if score >= 45: return "⚠️ 偏弱"
     return "🔴 避開"
 
-# ---------------- 候選池 ----------------
 WATCHLIST = [
     "2330","2317","2454","2382","3231","2308","2303","2881","2882","2886",
     "2891","2884","2885","2880","2883","2892","2887","1301","1303","2002",
@@ -285,97 +341,135 @@ WATCHLIST = [
     "2345","2360","2356","2376","2383","2395","2408","2449","2603","2609"
 ]
 
-# ---------------- 介面 ----------------
+# ==================== UI ====================
 with st.sidebar:
     st.header("設定")
     token = st.text_input(
         "FinMind Token（選填）",
         type="password",
-        help="不填也可使用；填入後可提高 API 使用上限。Token 不會寫入程式檔。"
+        help="不填也可使用；填入後通常可提高 API 使用上限。"
     )
-    page = st.radio("功能", ["🔥 綜合選股 Top20", "🔍 個股籌碼分析"], index=0)
+    page = st.radio(
+        "功能",
+        ["🎯 明日優先觀察 Top5", "📊 綜合排行 Top20", "🔍 個股實戰分析"],
+        index=0
+    )
 
-if page == "🔥 綜合選股 Top20":
-    st.subheader("🔥 法人＋籌碼＋技術面 Top20")
-    st.caption("綜合分＝技術面 60%＋籌碼面 40%。候選池採大型／高流動性股票，以控制 API 使用量。")
+def scan_market(pool_size, token):
+    info = get_stock_info(token)
+    info_map = dict(zip(info["stock_id"], info["stock_name"])) if not info.empty else {}
 
+    rows = []
+    progress = st.progress(0)
+    status = st.empty()
+
+    for idx, symbol in enumerate(WATCHLIST[:pool_size], start=1):
+        status.write(f"分析中：{symbol}（{idx}/{pool_size}）")
+
+        try:
+            price = get_price_history(symbol, 220, token)
+            inst = get_institutional(symbol, 30, token)
+            margin = get_margin(symbol, 30, token)
+
+            if len(price) < 61:
+                progress.progress(idx / pool_size)
+                continue
+
+            d = calc_indicators(price)
+            t_score, t_reasons = technical_score(d)
+            chip = chip_summary(inst, margin)
+            lock = lock_score(chip, d)
+            total = overall_score(t_score, chip["籌碼分"], lock)
+            levels = price_levels(d)
+
+            x = d.iloc[-1]
+            p = d.iloc[-2]
+            pct = (x["Close"] / p["Close"] - 1) * 100
+            vol_ratio = (
+                x["Volume"] / x["VOL_MA5"]
+                if pd.notna(x["VOL_MA5"]) and x["VOL_MA5"] > 0
+                else np.nan
+            )
+
+            rows.append({
+                "股票代號": symbol,
+                "名稱": info_map.get(symbol, ""),
+                "收盤價": round(float(x["Close"]), 2),
+                "漲跌幅%": round(float(pct), 2),
+                "實戰分": total,
+                "判定": verdict(total),
+                "技術分": t_score,
+                "籌碼分": chip["籌碼分"],
+                "法人集中代理": lock,
+                "外資(張)": round(chip["外資"], 0),
+                "投信(張)": round(chip["投信"], 0),
+                "法人連買": chip["法人連買"],
+                "融資增減(張)": round(chip["融資增減"], 0),
+                "量比": round(float(vol_ratio), 2) if pd.notna(vol_ratio) else None,
+                "支撐": levels["支撐"],
+                "壓力": levels["壓力"],
+                "觀察區": f"{levels['觀察區低']}~{levels['觀察區高']}",
+                "風險線": levels["風險線"],
+                "訊號": "、".join((chip["訊號"] + t_reasons)[:6]),
+            })
+
+        except Exception:
+            pass
+
+        progress.progress(idx / pool_size)
+
+    progress.empty()
+    status.empty()
+    return pd.DataFrame(rows)
+
+if page in ["🎯 明日優先觀察 Top5", "📊 綜合排行 Top20"]:
     pool_size = st.selectbox("候選池大小", [10, 15, 20], index=1)
-    run_scan = st.button("開始綜合掃描", type="primary")
+    run = st.button("開始掃描", type="primary")
 
-    if run_scan:
-        info = get_stock_info(token)
-        info_map = dict(zip(info["stock_id"], info["stock_name"])) if not info.empty else {}
+    if run:
+        with st.spinner("正在整合法人、融資、量價與技術面..."):
+            out = scan_market(pool_size, token)
 
-        results = []
-        progress = st.progress(0)
-        status = st.empty()
+        if out.empty:
+            st.error("本次沒有成功完成分析，可能遇到 API 使用次數限制或資料暫未更新。")
+            st.stop()
 
-        for idx, symbol in enumerate(WATCHLIST[:pool_size], start=1):
-            status.write(f"分析中：{symbol}（{idx}/{pool_size}）")
-            try:
-                price = get_price_history(symbol, 180, token)
-                inst = get_institutional(symbol, 20, token)
-                margin = get_margin(symbol, 20, token)
+        out = out.sort_values(
+            ["實戰分", "法人集中代理", "技術分"],
+            ascending=[False, False, False]
+        ).reset_index(drop=True)
 
-                if len(price) < 61:
-                    progress.progress(idx / pool_size)
-                    continue
+        if page == "🎯 明日優先觀察 Top5":
+            top5 = out.head(5).copy()
+            top5.index = top5.index + 1
 
-                d = calc_indicators(price)
-                t_score, t_reasons = technical_score(d)
-                chip = chip_summary(inst, margin)
+            st.subheader("🎯 明日優先觀察 Top5")
+            st.warning("此為盤後條件排序，不代表隔日必漲；請搭配開盤價、量能與大盤環境再次確認。")
+            st.dataframe(
+                top5[[
+                    "股票代號","名稱","收盤價","漲跌幅%","實戰分","判定",
+                    "外資(張)","投信(張)","法人連買","法人集中代理",
+                    "量比","支撐","壓力","觀察區","風險線"
+                ]],
+                use_container_width=True,
+                height=330
+            )
 
-                tech_60 = round(t_score * 0.60, 1)
-                chip_40 = chip["籌碼分"]
-                overall = min(round(tech_60 + chip_40, 1), 100)
+            best = top5.iloc[0]
+            st.success(
+                f"目前第 1 名：{best['股票代號']} {best['名稱']}｜"
+                f"實戰分 {best['實戰分']}｜{best['判定']}｜"
+                f"觀察區 {best['觀察區']}｜風險線 {best['風險線']}"
+            )
 
-                latest = d.iloc[-1]
-                prev = d.iloc[-2]
-                pct = (latest["Close"] / prev["Close"] - 1) * 100
-                vol_ratio = (
-                    latest["Volume"] / latest["VOL_MA5"]
-                    if pd.notna(latest["VOL_MA5"]) and latest["VOL_MA5"] > 0 else np.nan
-                )
-
-                results.append({
-                    "股票代號": symbol,
-                    "名稱": info_map.get(symbol, ""),
-                    "收盤價": round(float(latest["Close"]), 2),
-                    "漲跌幅%": round(float(pct), 2),
-                    "綜合分": overall,
-                    "判定": overall_grade(overall),
-                    "技術分": t_score,
-                    "籌碼分": chip["籌碼分"],
-                    "外資(張)": round(chip["外資買賣超"], 0),
-                    "投信(張)": round(chip["投信買賣超"], 0),
-                    "自營(張)": round(chip["自營商買賣超"], 0),
-                    "法人連買": chip["法人連買天數"],
-                    "融資增減(張)": round(chip["融資增減"], 0),
-                    "RSI": round(float(latest["RSI"]), 1),
-                    "量比": round(float(vol_ratio), 2) if pd.notna(vol_ratio) else None,
-                    "訊號": "、".join((chip["籌碼訊號"] + t_reasons)[:6]),
-                })
-            except Exception:
-                pass
-
-            progress.progress(idx / pool_size)
-
-        progress.empty()
-        status.empty()
-
-        if not results:
-            st.error("本次沒有成功完成分析。可能是 API 使用次數已達上限，或部分資料尚未更新。")
         else:
-            out = pd.DataFrame(results).sort_values(
-                ["綜合分", "籌碼分", "技術分"],
-                ascending=[False, False, False]
-            ).head(20).reset_index(drop=True)
-            out.index = out.index + 1
-            st.success(f"完成｜候選池 {pool_size} 檔")
-            st.dataframe(out, use_container_width=True, height=760)
+            top20 = out.head(20).copy()
+            top20.index = top20.index + 1
+            st.subheader("📊 綜合排行 Top20")
+            st.dataframe(top20, use_container_width=True, height=760)
 
 else:
-    st.subheader("🔍 個股籌碼分析")
+    st.subheader("🔍 個股實戰分析")
     symbol = st.text_input("股票代號", value="2330", max_chars=8)
     run = st.button("開始分析", type="primary")
 
@@ -392,22 +486,30 @@ else:
             d = calc_indicators(price)
             t_score, t_reasons = technical_score(d)
             chip = chip_summary(inst, margin)
-            overall = min(round(t_score * 0.60 + chip["籌碼分"], 1), 100)
-
-            latest = d.iloc[-1]
+            lock = lock_score(chip, d)
+            total = overall_score(t_score, chip["籌碼分"], lock)
+            levels = price_levels(d)
+            x = d.iloc[-1]
 
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("收盤價", f"{latest['Close']:.2f}")
-            c2.metric("技術分", f"{t_score}/100")
-            c3.metric("籌碼分", f"{chip['籌碼分']}/40")
-            c4.metric("綜合判定", f"{overall_grade(overall)}｜{overall}")
+            c1.metric("收盤價", f"{x['Close']:.2f}")
+            c2.metric("實戰分", f"{total}/100")
+            c3.metric("法人集中代理", f"{lock}/100")
+            c4.metric("判定", verdict(total))
 
-            st.subheader("三大法人")
+            st.subheader("關鍵價位")
             a,b,c,dcol = st.columns(4)
-            a.metric("外資買賣超", f"{chip['外資買賣超']:,.0f} 張")
-            b.metric("投信買賣超", f"{chip['投信買賣超']:,.0f} 張")
-            c.metric("自營商買賣超", f"{chip['自營商買賣超']:,.0f} 張")
-            dcol.metric("法人連買", f"{chip['法人連買天數']} 天")
+            a.metric("支撐參考", f"{levels['支撐']}")
+            b.metric("壓力參考", f"{levels['壓力']}")
+            c.metric("拉回觀察區", f"{levels['觀察區低']} ~ {levels['觀察區高']}")
+            dcol.metric("風險線參考", f"{levels['風險線']}")
+
+            st.subheader("法人籌碼")
+            a,b,c,dcol = st.columns(4)
+            a.metric("外資", f"{chip['外資']:,.0f} 張")
+            b.metric("投信", f"{chip['投信']:,.0f} 張")
+            c.metric("自營商", f"{chip['自營']:,.0f} 張")
+            dcol.metric("法人連買", f"{chip['法人連買']} 天")
 
             st.subheader("融資融券")
             a,b = st.columns(2)
@@ -421,17 +523,28 @@ else:
                 low=d["Low"], close=d["Close"], name="K線"
             ))
             for n in [5,10,20,60]:
-                fig.add_trace(go.Scatter(x=d.index, y=d[f"MA{n}"], mode="lines", name=f"MA{n}"))
-            fig.update_layout(height=600, xaxis_rangeslider_visible=False)
+                fig.add_trace(go.Scatter(
+                    x=d.index, y=d[f"MA{n}"], mode="lines", name=f"MA{n}"
+                ))
+            fig.add_hline(y=levels["支撐"], line_dash="dash", annotation_text="支撐")
+            fig.add_hline(y=levels["壓力"], line_dash="dash", annotation_text="壓力")
+            fig.add_hline(y=levels["風險線"], line_dash="dot", annotation_text="風險線")
+            fig.update_layout(height=650, xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("主要訊號")
-            for x in chip["籌碼訊號"] + t_reasons:
-                st.write(f"✅ {x}")
+            for s in chip["訊號"] + t_reasons:
+                st.write(f"✅ {s}")
+
+            st.info(
+                "「法人集中代理」不是實際法人持股集中度，而是依法人淨買超、連買、融資變化與技術結構建立的代理分數。"
+            )
 
         except Exception as e:
             st.error("分析發生錯誤。")
             st.code(f"{type(e).__name__}: {e}")
 
 st.divider()
-st.caption("本系統僅供技術與籌碼研究，不構成投資建議。法人資料與融資融券資料有各自更新時間，盤後資料請以 API 當下回傳為準。")
+st.caption(
+    "本系統僅供技術與籌碼研究，不構成投資建議。支撐、壓力、觀察區與風險線均為模型參考值，不是保證成交或獲利價位。"
+)
