@@ -6,10 +6,10 @@ import requests
 import plotly.graph_objects as go
 from datetime import date, timedelta
 
-st.set_page_config(page_title="台股買賣決策雷達 V9", layout="wide")
+st.set_page_config(page_title="台股日週線買賣雷達 V10.1", layout="wide")
 
-st.title("🚦 台股買賣決策雷達 V9")
-st.caption("目前動作｜參考買進｜停損價｜第一目標｜第二目標｜法人＋量價＋技術面｜FinMind")
+st.title("📈 台股日週線買賣雷達 V10.1")
+st.caption("▲ 買進訊號｜▼ 賣出訊號｜日線 / 週線切換｜停損價｜法人＋技術面｜FinMind")
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 
@@ -386,7 +386,7 @@ def trade_plan(d, levels, total_score, chip):
         "第一壓力": round(resistance1, 2),
         "第二壓力": round(resistance2, 2),
         "停損價": round(invalid, 2),
-        "風報比": round(rr, 2),
+        "": round(rr, 2),
         "突破條件": f"收盤/盤中有效突破 {breakout:.2f} 且量能≥5日均量1.2倍",
     }
 
@@ -506,10 +506,10 @@ def current_signal_card(d, plan):
         "操作條件": instruction,
         "參考進場": round(entry_ref, 2),
         "停損價": round(stop, 2),
-        "第一目標": round(target1, 2),
-        "第二目標": round(target2, 2),
-        "風報比1": round(rr1, 2),
-        "風報比2": round(rr2, 2),
+        "目標": round(target1, 2),
+        "目標": round(target2, 2),
+        "1": round(rr1, 2),
+        "2": round(rr2, 2),
     }
 
 
@@ -530,8 +530,8 @@ def action_decision(d, signal_card, chip):
 
     entry = float(signal_card["參考進場"])
     stop = float(signal_card["停損價"])
-    target1 = float(signal_card["第一目標"])
-    target2 = float(signal_card["第二目標"])
+    target1 = float(signal_card["目標"])
+    target2 = float(signal_card["目標"])
 
     near_entry = abs(close - entry) / max(entry, 0.01) <= 0.015
     breakout_ok = close >= entry and vol_ratio >= 1.2
@@ -544,7 +544,7 @@ def action_decision(d, signal_card, chip):
         reason = "跌破停損價或中期趨勢轉弱，優先控制風險。"
     elif close >= target1 or rsi >= 78:
         action = "🟠 減碼"
-        reason = "接近/突破第一目標或動能過熱，可分批調節。"
+        reason = "接近/突破目標或動能過熱，可分批調節。"
     elif trend_ok and chip_ok and (near_entry or breakout_ok):
         action = "🟢 買進"
         reason = "趨勢、籌碼與價量條件同時轉強，進入可執行區。"
@@ -561,11 +561,118 @@ def action_decision(d, signal_card, chip):
         "量比": round(vol_ratio, 2),
         "參考買進": round(entry, 2),
         "停損價": round(stop, 2),
-        "第一目標": round(target1, 2),
-        "第二目標": round(target2, 2),
-        "風報比1": signal_card["風報比1"],
-        "風報比2": signal_card["風報比2"],
+        "目標": round(target1, 2),
+        "目標": round(target2, 2),
+        "1": signal_card["1"],
+        "2": signal_card["2"],
     }
+
+
+
+# ==================== V10 日線 / 週線與交替買賣訊號 ====================
+def to_weekly(df):
+    """將日線轉成週線（週五收盤週期）。"""
+    if df.empty:
+        return df
+    w = pd.DataFrame({
+        "Open": df["Open"].resample("W-FRI").first(),
+        "High": df["High"].resample("W-FRI").max(),
+        "Low": df["Low"].resample("W-FRI").min(),
+        "Close": df["Close"].resample("W-FRI").last(),
+        "Volume": df["Volume"].resample("W-FRI").sum(),
+    }).dropna(subset=["Open", "High", "Low", "Close"])
+    return w
+
+def build_alternating_signals(d):
+    """
+    交替式訊號：
+    空手時只允許出現 ▲ 買進；
+    持有後只允許出現 ▼ 賣出；
+    避免同一段行情重複出現多個買點或賣點。
+    """
+    z = d.copy()
+
+    ma_up = (z["MA5"] > z["MA20"]) & (z["MA5"].shift(1) <= z["MA20"].shift(1))
+    ma_dn = (z["MA5"] < z["MA20"]) & (z["MA5"].shift(1) >= z["MA20"].shift(1))
+    macd_bull = z["MACD"] > z["Signal"]
+    macd_bear = z["MACD"] < z["Signal"]
+    kd_bull = z["K"] > z["D"]
+    kd_bear = z["K"] < z["D"]
+    trend_bull = (z["Close"] > z["MA20"]) & (z["MA20"] >= z["MA20"].shift(1))
+    break20 = (z["Close"] > z["HIGH20_PREV"]) & (z["Volume"] >= z["VOL_MA5"] * 1.15)
+    trend_break = z["Close"] < z["MA20"]
+
+    z["TradeSignal"] = ""
+    z["TradeReason"] = ""
+    z["TradePrice"] = np.nan
+    z["TradeStop"] = np.nan
+
+    in_position = False
+    entry_stop = np.nan
+
+    for i in range(1, len(z)):
+        row = z.iloc[i]
+
+        # 買進：MA5 上穿 MA20 為主，MACD / KD / 突破至少再有一項確認。
+        confirmations = int(bool(macd_bull.iloc[i])) + int(bool(kd_bull.iloc[i])) + int(bool(break20.iloc[i]))
+        buy_ok = bool(ma_up.iloc[i] and trend_bull.iloc[i] and confirmations >= 1)
+
+        # 另外允許「突破放量」型買點，但必須整體趨勢多頭。
+        breakout_buy = bool(break20.iloc[i] and trend_bull.iloc[i] and macd_bull.iloc[i])
+
+        # 賣出：MA5 跌破 MA20，或跌破 MA20 且 MACD 轉空。
+        sell_ok = bool(ma_dn.iloc[i] or (trend_break.iloc[i] and macd_bear.iloc[i]))
+
+        if not in_position and (buy_ok or breakout_buy):
+            reasons = []
+            if ma_up.iloc[i]: reasons.append("MA5上穿MA20")
+            if break20.iloc[i]: reasons.append("突破20期高點＋量能")
+            if macd_bull.iloc[i]: reasons.append("MACD偏多")
+            if kd_bull.iloc[i]: reasons.append("KD偏多")
+
+            atr = row["ATR14"] if pd.notna(row["ATR14"]) and row["ATR14"] > 0 else row["Close"] * 0.02
+            base_support = row["MA20"] if pd.notna(row["MA20"]) else row["Close"]
+            entry_stop = max(0.01, float(base_support) - 0.8 * float(atr))
+
+            z.iat[i, z.columns.get_loc("TradeSignal")] = "BUY"
+            z.iat[i, z.columns.get_loc("TradeReason")] = "、".join(reasons[:4])
+            z.iat[i, z.columns.get_loc("TradePrice")] = float(row["Close"])
+            z.iat[i, z.columns.get_loc("TradeStop")] = entry_stop
+            in_position = True
+
+        elif in_position:
+            stop_hit = pd.notna(entry_stop) and float(row["Close"]) <= float(entry_stop)
+
+            if sell_ok or stop_hit:
+                reasons = []
+                if stop_hit: reasons.append("跌破停損價")
+                if ma_dn.iloc[i]: reasons.append("MA5跌破MA20")
+                if trend_break.iloc[i]: reasons.append("跌破MA20")
+                if macd_bear.iloc[i]: reasons.append("MACD轉空")
+                if kd_bear.iloc[i]: reasons.append("KD轉弱")
+
+                z.iat[i, z.columns.get_loc("TradeSignal")] = "SELL"
+                z.iat[i, z.columns.get_loc("TradeReason")] = "、".join(reasons[:4])
+                z.iat[i, z.columns.get_loc("TradePrice")] = float(row["Close"])
+                z.iat[i, z.columns.get_loc("TradeStop")] = entry_stop
+                in_position = False
+                entry_stop = np.nan
+
+    # 最新交易狀態
+    signals = z[z["TradeSignal"] != ""]
+    if signals.empty:
+        latest_state = "🟡 尚無完整買賣訊號"
+        current_stop = np.nan
+    else:
+        last_signal = signals.iloc[-1]
+        if last_signal["TradeSignal"] == "BUY":
+            latest_state = "🟢 持有 / 等待賣出訊號"
+            current_stop = float(last_signal["TradeStop"]) if pd.notna(last_signal["TradeStop"]) else np.nan
+        else:
+            latest_state = "⚪ 空手 / 等待買進訊號"
+            current_stop = np.nan
+
+    return z, latest_state, current_stop
 
 
 # ==================== UI ====================
@@ -644,7 +751,7 @@ def scan_market(pool_size, token):
                 "第一壓力": plan["第一壓力"],
                 "第二壓力": plan["第二壓力"],
                 "停損價": plan["停損價"],
-                "風報比": plan["風報比"],
+                "": plan[""],
                 "突破條件": plan["突破條件"],
                 "訊號": "、".join((chip["訊號"] + t_reasons)[:6]),
             })
@@ -685,7 +792,7 @@ if page in ["🚦 明日決策 Top5", "🔥 法人＋技術雙強 Top5", "📊 �
                 top5[[
                     "股票代號","名稱","收盤價","實戰分","決策",
                     "外資(張)","投信(張)","法人連買","籌碼強度","量比",
-                    "拉回觀察區","突破參考","第一壓力","第二壓力","停損價","風報比"
+                    "拉回觀察區","突破參考","停損價",""
                 ]],
                 use_container_width=True,
                 height=330
@@ -718,7 +825,7 @@ if page in ["🚦 明日決策 Top5", "🔥 法人＋技術雙強 Top5", "📊 �
                     strong[[
                         "股票代號","名稱","實戰分","技術分","籌碼強度",
                         "外資(張)","投信(張)","法人連買","量比",
-                        "拉回觀察區","突破參考","停損價","風報比"
+                        "拉回觀察區","突破參考","停損價",""
                     ]],
                     use_container_width=True,
                     height=330
@@ -730,150 +837,181 @@ if page in ["🚦 明日決策 Top5", "🔥 法人＋技術雙強 Top5", "📊 �
             st.dataframe(top20, use_container_width=True, height=760)
 
 else:
-    st.subheader("🔍 個股實戰分析")
-    symbol = st.text_input("股票代號", value="2330", max_chars=8)
-    run = st.button("開始分析", type="primary")
+    st.subheader("🔍 個股日線 / 週線買賣訊號")
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        symbol = st.text_input("股票代號", value="2330", max_chars=8)
+    with c2:
+        timeframe = st.selectbox("買賣週期", ["日線", "週線"], index=0)
+
+    run = st.button("開始分析買賣訊號", type="primary")
 
     if run:
         try:
-            price = get_price_history(symbol, 800, token)
+            # 週線 MA60 需要較長歷史，因此週線固定抓約 5 年。
+            fetch_days = 800 if timeframe == "日線" else 1900
+
+            daily = get_price_history(symbol, fetch_days, token)
             inst = get_institutional(symbol, 30, token)
             margin = get_margin(symbol, 30, token)
 
-            if len(price) < 61:
-                st.error("股價資料不足。")
+            if daily.empty:
+                st.error("目前沒有取得這檔股票資料。")
                 st.stop()
 
-            d = calc_indicators(price)
-            t_score, t_reasons = technical_score(d)
+            base = daily if timeframe == "日線" else to_weekly(daily)
+
+            if len(base) < 70:
+                st.error(f"{timeframe}資料不足，目前只有 {len(base)} 根 K 棒。")
+                st.stop()
+
+            d = calc_indicators(base)
+            d, latest_state, current_stop = build_alternating_signals(d)
+
             chip = chip_summary(inst, margin)
-            lock = lock_score(chip, d)
-            total = overall_score(t_score, chip["籌碼分"], lock)
-            levels = price_levels(d)
-            plan = trade_plan(d, levels, total, chip)
-            d = build_trade_signals(d)
-            signal_card = current_signal_card(d, plan)
-            action_card = action_decision(d, signal_card, chip)
-            x = d.iloc[-1]
+            t_score, t_reasons = technical_score(d)
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("收盤價", f"{x['Close']:.2f}")
-            c2.metric("實戰分", f"{total}/100")
-            c3.metric("籌碼強度", f"{lock}/100")
-            c4.metric("判定", verdict(total))
+            st.success(f"{symbol}｜{timeframe}｜共 {len(d)} 根 K 棒")
+            st.markdown(f"## 目前狀態：{latest_state}")
 
-            st.subheader("🚦 V9 買賣決策")
-            st.info("訊號以收盤確認為原則；當日形成的訊號，最早以下一交易日作為執行參考。")
-            st.markdown(f"## {action_card['目前動作']}")
-            st.write(action_card["動作原因"])
+            signals = d[d["TradeSignal"] != ""].copy()
+            buys = signals[signals["TradeSignal"] == "BUY"]
+            sells = signals[signals["TradeSignal"] == "SELL"]
 
-            q1,q2,q3,q4 = st.columns(4)
-            q1.metric("參考買進價", f"{action_card['參考買進']}")
-            q2.metric("🛑 停損價", f"{action_card['停損價']}")
-            q3.metric("🎯 第一目標", f"{action_card['第一目標']}")
-            q4.metric("🎯 第二目標", f"{action_card['第二目標']}")
+            last_buy = buys.iloc[-1] if not buys.empty else None
+            last_sell = sells.iloc[-1] if not sells.empty else None
 
-            r1,r2,r3 = st.columns(3)
-            r1.metric("距離買進價", f"{action_card['距離買進價%']:+.2f}%")
-            r2.metric("目前量比", f"{action_card['量比']:.2f}")
-            r3.metric("風報比", f"{action_card['風報比1']}:1 / {action_card['風報比2']}:1")
-
-            st.caption(
-                f"原始訊號：{signal_card['目前訊號']}｜{signal_card['操作條件']}"
+            a,b,c,dcol = st.columns(4)
+            a.metric(
+                "最近買進訊號",
+                f"{last_buy.name.strftime('%Y-%m-%d')}" if last_buy is not None else "尚無"
+            )
+            b.metric(
+                "最近買進價",
+                f"{last_buy['TradePrice']:.2f}" if last_buy is not None else "-"
+            )
+            c.metric(
+                "最近賣出訊號",
+                f"{last_sell.name.strftime('%Y-%m-%d')}" if last_sell is not None else "尚無"
+            )
+            dcol.metric(
+                "最近賣出價",
+                f"{last_sell['TradePrice']:.2f}" if last_sell is not None else "-"
             )
 
-            st.subheader("🚦 明日決策卡")
-            st.success(f"{plan['決策']}｜{plan['突破條件']}")
-            a,b,c,dcol = st.columns(4)
-            a.metric("拉回觀察區", plan["拉回觀察區"])
-            b.metric("突破參考", f"{plan['突破參考']}")
-            c.metric("第一 / 第二壓力", f"{plan['第一壓力']} / {plan['第二壓力']}")
-            dcol.metric("停損價", f"{plan['停損價']}")
-            st.metric("風險報酬比", f"{plan['風報比']}:1")
+            if pd.notna(current_stop):
+                st.metric("🛑 目前停損價", f"{current_stop:.2f}")
 
-            st.subheader("法人籌碼")
-            a,b,c,dcol = st.columns(4)
-            a.metric("外資", f"{chip['外資']:,.0f} 張")
-            b.metric("投信", f"{chip['投信']:,.0f} 張")
-            c.metric("自營商", f"{chip['自營']:,.0f} 張")
-            dcol.metric("法人連買", f"{chip['法人連買']} 天")
+            st.subheader(f"📈 {timeframe} K線＋MA5／MA10／MA20＋▲買進 / ▼賣出")
+            st.caption("▲ 買進後進入持有狀態；持有期間不重複買。▼ 賣出後回到空手，等待下一次 ▲。")
 
-            st.subheader("融資融券")
-            a,b = st.columns(2)
-            a.metric("融資增減", f"{chip['融資增減']:,.0f} 張")
-            b.metric("融券增減", f"{chip['融券增減']:,.0f} 張")
-
-            st.subheader("📈 K線＋模擬買賣訊號")
-            st.caption("▲＝歷史買進條件成立；▼＝歷史賣出／退出條件成立。訊號只使用當時以前資料計算。")
             fig = go.Figure()
+
             fig.add_trace(go.Candlestick(
-                x=d.index, open=d["Open"], high=d["High"],
-                low=d["Low"], close=d["Close"], name="K線"
-            ))
-            fig.add_trace(go.Scatter(
-                x=d.index, y=d["MA5"], mode="lines", name="MA5"
-            ))
-            fig.add_trace(go.Scatter(
-                x=d.index, y=d["MA20"], mode="lines", name="MA20"
+                x=d.index,
+                open=d["Open"],
+                high=d["High"],
+                low=d["Low"],
+                close=d["Close"],
+                name="K線",
+                increasing_line_color="#00c176",
+                decreasing_line_color="#ff4d4f"
             ))
 
-            buys = d[d["BuySignal"]].copy()
-            sells = d[d["SellSignal"]].copy()
+            fig.add_trace(go.Scatter(
+                x=d.index, y=d["MA5"],
+                mode="lines", name="MA5",
+                line=dict(color="#ffd400", width=2)
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=d.index, y=d["MA10"],
+                mode="lines", name="MA10",
+                line=dict(color="#38bdf8", width=2)
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=d.index, y=d["MA20"],
+                mode="lines", name="MA20",
+                line=dict(color="#9b4dff", width=2)
+            ))
+
             if not buys.empty:
                 fig.add_trace(go.Scatter(
                     x=buys.index,
                     y=buys["Low"] - buys["ATR14"].fillna(0) * 0.35,
                     mode="markers",
-                    marker=dict(symbol="triangle-up", size=13),
-                    name="模擬買進訊號",
-                    text=buys["BuyReason"],
-                    hovertemplate="%{x}<br>買進訊號<br>%{text}<extra></extra>"
+                    marker=dict(
+                        symbol="triangle-up",
+                        size=14,
+                        color="#ff4d4f",
+                        line=dict(color="white", width=1.5)
+                    ),
+                    name="買進訊號 ▲",
+                    text=buys["TradeReason"],
+                    customdata=buys["TradePrice"],
+                    hovertemplate="%{x}<br>▲ 買進<br>價格：%{customdata:.2f}<br>%{text}<extra></extra>"
                 ))
+
             if not sells.empty:
                 fig.add_trace(go.Scatter(
                     x=sells.index,
                     y=sells["High"] + sells["ATR14"].fillna(0) * 0.35,
                     mode="markers",
-                    marker=dict(symbol="triangle-down", size=13),
-                    name="模擬賣出訊號",
-                    text=sells["SellReason"],
-                    hovertemplate="%{x}<br>賣出訊號<br>%{text}<extra></extra>"
+                    marker=dict(
+                        symbol="triangle-down",
+                        size=14,
+                        color="#00c176",
+                        line=dict(color="white", width=1.5)
+                    ),
+                    name="賣出訊號 ▼",
+                    text=sells["TradeReason"],
+                    customdata=sells["TradePrice"],
+                    hovertemplate="%{x}<br>▼ 賣出<br>價格：%{customdata:.2f}<br>%{text}<extra></extra>"
                 ))
 
-            fig.add_hline(y=signal_card["參考進場"], line_dash="dash", annotation_text="參考進場")
-            fig.add_hline(y=signal_card["停損價"], line_dash="dot", annotation_text="停損價")
-            fig.add_hline(y=signal_card["第一目標"], line_dash="dash", annotation_text="第一目標")
-            fig.add_hline(y=signal_card["第二目標"], line_dash="dash", annotation_text="第二目標")
-            fig.update_layout(height=700, xaxis_rangeslider_visible=False)
+            if pd.notna(current_stop):
+                fig.add_hline(
+                    y=current_stop,
+                    line_dash="dot",
+                    annotation_text="停損價"
+                )
+
+            fig.update_layout(
+                height=720,
+                template="plotly_dark",
+                xaxis_rangeslider_visible=False,
+                hovermode="x unified",
+                legend=dict(orientation="h", y=1.08, x=0)
+            )
             st.plotly_chart(fig, use_container_width=True)
 
-            recent = pd.concat([
-                buys.assign(訊號="▲ 買進", 原因=buys["BuyReason"]),
-                sells.assign(訊號="▼ 賣出", 原因=sells["SellReason"])
-            ]).sort_index().tail(12)
-            if not recent.empty:
-                st.subheader("最近 12 次歷史訊號")
-                recent_table = pd.DataFrame({
+            st.subheader("最近買賣紀錄")
+            if signals.empty:
+                st.info("目前歷史資料尚未出現符合完整規則的買賣訊號。")
+            else:
+                recent = signals.tail(16)
+                table = pd.DataFrame({
                     "日期": recent.index.strftime("%Y-%m-%d"),
-                    "訊號": recent["訊號"].values,
-                    "收盤價": recent["Close"].round(2).values,
-                    "原因": recent["原因"].values,
+                    "週期": timeframe,
+                    "訊號": recent["TradeSignal"].map({"BUY":"▲ 買進", "SELL":"▼ 賣出"}),
+                    "價格": recent["TradePrice"].round(2),
+                    "原因": recent["TradeReason"],
+                    "停損價": recent["TradeStop"].round(2),
                 })
-                st.dataframe(recent_table, use_container_width=True, hide_index=True)
+                st.dataframe(table, use_container_width=True, hide_index=True)
 
-            st.subheader("主要訊號")
-            for s in chip["訊號"] + t_reasons:
-                st.write(f"✅ {s}")
-
-            st.info(
-                "「籌碼強度」不是實際法人持股集中度，而是依法人淨買超、連買、融資變化與技術結構建立的代理分數。"
-            )
+            st.subheader("訊號規則")
+            st.write("▲ **買進**：MA5 上穿 MA20 為主，並由 MACD、KD 或突破放量至少一項確認。")
+            st.write("▼ **賣出**：MA5 跌破 MA20，或跌破 MA20 且 MACD 轉空；持有期間若跌破停損價也會出場。")
+            st.info("日線與週線是兩套獨立訊號。週線速度較慢、訊號較少；日線較靈敏、訊號較多。所有訊號均以該根 K 棒收盤資料確認。")
 
         except Exception as e:
-            st.error("分析發生錯誤。")
+            st.error("買賣訊號分析發生錯誤。")
             st.code(f"{type(e).__name__}: {e}")
 
 st.divider()
 st.caption(
-    "本系統僅供技術與籌碼研究，不構成投資建議。拉回觀察區、突破參考、壓力、停損價與風險報酬比均為模型條件值，不是保證成交或獲利價位。"
+    "本系統僅供技術與籌碼研究，不構成投資建議。拉回觀察區、突破參考、壓力、停損價與均為模型條件值，不是保證成交或獲利價位。"
 )
