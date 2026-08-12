@@ -6,10 +6,10 @@ import requests
 import plotly.graph_objects as go
 from datetime import date, timedelta
 
-st.set_page_config(page_title="台股盤前盤後決策雷達 V7", layout="wide")
+st.set_page_config(page_title="台股買賣訊號雷達 V8", layout="wide")
 
-st.title("🚦 台股盤前盤後決策雷達 V7")
-st.caption("明日決策 Top5｜法人＋融資＋量價＋技術面｜買點條件＋失效價＋風險報酬｜FinMind")
+st.title("🎯 台股買賣訊號雷達 V8")
+st.caption("K線買賣訊號｜進場條件｜停損失效｜目標價｜法人＋量價＋技術面｜FinMind")
 
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 
@@ -390,6 +390,128 @@ def trade_plan(d, levels, total_score, chip):
         "突破條件": f"收盤/盤中有效突破 {breakout:.2f} 且量能≥5日均量1.2倍",
     }
 
+
+# ==================== V8 買賣訊號引擎 ====================
+def build_trade_signals(d):
+    """
+    只使用當日及以前資料產生歷史訊號，避免偷看未來資料。
+    訊號以「收盤確認」為原則；若使用當日收盤資料，最早於下一交易日執行。
+    """
+    z = d.copy()
+    z["BuySignal"] = False
+    z["SellSignal"] = False
+    z["BuyReason"] = ""
+    z["SellReason"] = ""
+
+    # 交叉與趨勢條件
+    ma_cross_up = (z["MA5"] > z["MA20"]) & (z["MA5"].shift(1) <= z["MA20"].shift(1))
+    ma_cross_dn = (z["MA5"] < z["MA20"]) & (z["MA5"].shift(1) >= z["MA20"].shift(1))
+    macd_up = (z["MACD"] > z["Signal"]) & (z["MACD"].shift(1) <= z["Signal"].shift(1))
+    macd_dn = (z["MACD"] < z["Signal"]) & (z["MACD"].shift(1) >= z["Signal"].shift(1))
+    kd_up = (z["K"] > z["D"]) & (z["K"].shift(1) <= z["D"].shift(1))
+    kd_dn = (z["K"] < z["D"]) & (z["K"].shift(1) >= z["D"].shift(1))
+    breakout = (z["Close"] > z["HIGH20_PREV"]) & (z["Volume"] >= z["VOL_MA5"] * 1.2)
+    trend_ok = (z["Close"] > z["MA20"]) & (z["MA20"] >= z["MA20"].shift(1))
+    weak_break = (z["Close"] < z["MA20"]) & (z["Close"].shift(1) >= z["MA20"].shift(1))
+    rsi_ok = z["RSI"].between(50, 75)
+    rsi_hot = z["RSI"] >= 78
+
+    # 買進分數：至少 3 個條件，且趨勢需站上 MA20。
+    buy_points = (
+        ma_cross_up.astype(int) * 2 +
+        macd_up.astype(int) * 2 +
+        kd_up.astype(int) +
+        breakout.astype(int) * 2 +
+        rsi_ok.astype(int) +
+        (z["Volume"] > z["VOL_MA5"]).astype(int)
+    )
+    raw_buy = trend_ok & (buy_points >= 3)
+
+    # 賣出：趨勢破壞、MACD/均線死叉，或過熱後轉弱。
+    sell_points = (
+        ma_cross_dn.astype(int) * 2 +
+        macd_dn.astype(int) * 2 +
+        kd_dn.astype(int) +
+        weak_break.astype(int) * 2 +
+        rsi_hot.astype(int)
+    )
+    raw_sell = (sell_points >= 3) | (weak_break & macd_dn)
+
+    # 去除連續重複訊號：只有從 False -> True 時畫一次。
+    z["BuySignal"] = raw_buy & ~raw_buy.shift(1, fill_value=False)
+    z["SellSignal"] = raw_sell & ~raw_sell.shift(1, fill_value=False)
+
+    for i in range(1, len(z)):
+        if z["BuySignal"].iat[i]:
+            rs = []
+            if bool(ma_cross_up.iat[i]): rs.append("MA5上穿MA20")
+            if bool(macd_up.iat[i]): rs.append("MACD黃金交叉")
+            if bool(kd_up.iat[i]): rs.append("KD黃金交叉")
+            if bool(breakout.iat[i]): rs.append("20日突破＋量增")
+            if bool(rsi_ok.iat[i]): rs.append("RSI多方")
+            z.iat[i, z.columns.get_loc("BuyReason")] = "、".join(rs[:4])
+        if z["SellSignal"].iat[i]:
+            rs = []
+            if bool(ma_cross_dn.iat[i]): rs.append("MA5跌破MA20")
+            if bool(macd_dn.iat[i]): rs.append("MACD死叉")
+            if bool(kd_dn.iat[i]): rs.append("KD死叉")
+            if bool(weak_break.iat[i]): rs.append("跌破MA20")
+            if bool(rsi_hot.iat[i]): rs.append("RSI過熱")
+            z.iat[i, z.columns.get_loc("SellReason")] = "、".join(rs[:4])
+    return z
+
+def current_signal_card(d, plan):
+    x = d.iloc[-1]
+    p = d.iloc[-2]
+    close = float(x["Close"])
+    atr = float(x["ATR14"]) if pd.notna(x["ATR14"]) and x["ATR14"] > 0 else close * 0.02
+
+    breakout = float(plan["突破參考"])
+    stop = float(plan["失效價"])
+
+    # 目標價以突破價/現價為基準，避免第一壓力與突破價完全重複。
+    entry_ref = max(close, breakout)
+    target1 = max(entry_ref + atr, float(plan["第一壓力"]))
+    target2 = max(entry_ref + 2 * atr, float(plan["第二壓力"]))
+
+    buy_now = (
+        close > x["MA20"] and x["MA5"] > x["MA20"] and
+        x["MACD"] > x["Signal"] and x["RSI"] >= 50 and x["RSI"] < 75
+    )
+    sell_now = (
+        close < x["MA20"] or
+        (x["MACD"] < x["Signal"] and x["MA5"] < x["MA20"]) or
+        close <= stop
+    )
+
+    if sell_now:
+        state = "🔴 賣出／退出訊號"
+        instruction = f"收盤跌破關鍵趨勢或失效價 {stop:.2f}，優先控管風險。"
+    elif buy_now:
+        state = "🟢 偏多，等待買點"
+        instruction = (
+            f"方案A：拉回 {plan['拉回觀察區']} 止穩；"
+            f"方案B：突破 {breakout:.2f} 且量能≥5日均量1.2倍。"
+        )
+    else:
+        state = "🟡 觀望"
+        instruction = "條件尚未完整，不追價；等待拉回止穩或突破放量確認。"
+
+    risk = max(entry_ref - stop, 0.01)
+    rr1 = max(target1 - entry_ref, 0) / risk
+    rr2 = max(target2 - entry_ref, 0) / risk
+
+    return {
+        "目前訊號": state,
+        "操作條件": instruction,
+        "參考進場": round(entry_ref, 2),
+        "停損失效": round(stop, 2),
+        "第一目標": round(target1, 2),
+        "第二目標": round(target2, 2),
+        "風報比1": round(rr1, 2),
+        "風報比2": round(rr2, 2),
+    }
+
 # ==================== UI ====================
 with st.sidebar:
     st.header("設定")
@@ -573,6 +695,8 @@ else:
             total = overall_score(t_score, chip["籌碼分"], lock)
             levels = price_levels(d)
             plan = trade_plan(d, levels, total, chip)
+            d = build_trade_signals(d)
+            signal_card = current_signal_card(d, plan)
             x = d.iloc[-1]
 
             c1, c2, c3, c4 = st.columns(4)
@@ -580,6 +704,20 @@ else:
             c2.metric("實戰分", f"{total}/100")
             c3.metric("籌碼強度", f"{lock}/100")
             c4.metric("判定", verdict(total))
+
+            st.subheader("🎯 V8 買賣決策")
+            st.info("訊號以收盤確認為原則；當日收盤形成的訊號，最早以下一交易日作為執行參考。")
+            st.markdown(f"### {signal_card['目前訊號']}")
+            st.write(signal_card["操作條件"])
+            q1,q2,q3,q4 = st.columns(4)
+            q1.metric("參考進場", f"{signal_card['參考進場']}")
+            q2.metric("停損 / 失效", f"{signal_card['停損失效']}")
+            q3.metric("第一目標", f"{signal_card['第一目標']}")
+            q4.metric("第二目標", f"{signal_card['第二目標']}")
+            st.caption(
+                f"風報比：第一目標 {signal_card['風報比1']}:1｜"
+                f"第二目標 {signal_card['風報比2']}:1"
+            )
 
             st.subheader("🚦 明日決策卡")
             st.success(f"{plan['決策']}｜{plan['突破條件']}")
@@ -602,22 +740,63 @@ else:
             a.metric("融資增減", f"{chip['融資增減']:,.0f} 張")
             b.metric("融券增減", f"{chip['融券增減']:,.0f} 張")
 
-            st.subheader("K線＋均線")
+            st.subheader("📈 K線＋模擬買賣訊號")
+            st.caption("▲＝歷史買進條件成立；▼＝歷史賣出／退出條件成立。訊號只使用當時以前資料計算。")
             fig = go.Figure()
             fig.add_trace(go.Candlestick(
                 x=d.index, open=d["Open"], high=d["High"],
                 low=d["Low"], close=d["Close"], name="K線"
             ))
-            for n in [5,10,20,60]:
+            fig.add_trace(go.Scatter(
+                x=d.index, y=d["MA5"], mode="lines", name="MA5"
+            ))
+            fig.add_trace(go.Scatter(
+                x=d.index, y=d["MA20"], mode="lines", name="MA20"
+            ))
+
+            buys = d[d["BuySignal"]].copy()
+            sells = d[d["SellSignal"]].copy()
+            if not buys.empty:
                 fig.add_trace(go.Scatter(
-                    x=d.index, y=d[f"MA{n}"], mode="lines", name=f"MA{n}"
+                    x=buys.index,
+                    y=buys["Low"] - buys["ATR14"].fillna(0) * 0.35,
+                    mode="markers",
+                    marker=dict(symbol="triangle-up", size=13),
+                    name="模擬買進訊號",
+                    text=buys["BuyReason"],
+                    hovertemplate="%{x}<br>買進訊號<br>%{text}<extra></extra>"
                 ))
-            fig.add_hline(y=levels["支撐"], line_dash="dash", annotation_text="支撐")
-            fig.add_hline(y=plan["第一壓力"], line_dash="dash", annotation_text="第一壓力")
-            fig.add_hline(y=plan["第二壓力"], line_dash="dash", annotation_text="第二壓力")
-            fig.add_hline(y=plan["失效價"], line_dash="dot", annotation_text="失效價")
-            fig.update_layout(height=650, xaxis_rangeslider_visible=False)
+            if not sells.empty:
+                fig.add_trace(go.Scatter(
+                    x=sells.index,
+                    y=sells["High"] + sells["ATR14"].fillna(0) * 0.35,
+                    mode="markers",
+                    marker=dict(symbol="triangle-down", size=13),
+                    name="模擬賣出訊號",
+                    text=sells["SellReason"],
+                    hovertemplate="%{x}<br>賣出訊號<br>%{text}<extra></extra>"
+                ))
+
+            fig.add_hline(y=signal_card["參考進場"], line_dash="dash", annotation_text="參考進場")
+            fig.add_hline(y=signal_card["停損失效"], line_dash="dot", annotation_text="停損/失效")
+            fig.add_hline(y=signal_card["第一目標"], line_dash="dash", annotation_text="第一目標")
+            fig.add_hline(y=signal_card["第二目標"], line_dash="dash", annotation_text="第二目標")
+            fig.update_layout(height=700, xaxis_rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
+
+            recent = pd.concat([
+                buys.assign(訊號="▲ 買進", 原因=buys["BuyReason"]),
+                sells.assign(訊號="▼ 賣出", 原因=sells["SellReason"])
+            ]).sort_index().tail(12)
+            if not recent.empty:
+                st.subheader("最近 12 次歷史訊號")
+                recent_table = pd.DataFrame({
+                    "日期": recent.index.strftime("%Y-%m-%d"),
+                    "訊號": recent["訊號"].values,
+                    "收盤價": recent["Close"].round(2).values,
+                    "原因": recent["原因"].values,
+                })
+                st.dataframe(recent_table, use_container_width=True, hide_index=True)
 
             st.subheader("主要訊號")
             for s in chip["訊號"] + t_reasons:
